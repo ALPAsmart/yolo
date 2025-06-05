@@ -1,88 +1,75 @@
-import threading
-import time
-import torch
+from flask import Flask, request, jsonify
+import tensorflow as tf
+import tensorflow_hub as hub
+import numpy as np
 import cv2
-import pyttsx3
-from flask import Flask, jsonify, requests
+import base64
 
 app = Flask(__name__)
 
-model = torch.hub.load('yolov5', 'custom', path='yolov5s.pt', source='local')
-engine = pyttsx3.init()
+COCO_LABELS = [
+    '???', 'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
+    'train', 'truck', 'boat', 'traffic light', 'fire hydrant', '???',
+    'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse',
+    'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
+    'umbrella', '???', '???', 'handbag', 'tie', 'suitcase', 'frisbee',
+    'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove',
+    'skateboard', 'surfboard', 'tennis racket', 'bottle', '???', 'wine glass',
+    'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich',
+    'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
+    'chair', 'couch', 'potted plant', 'bed', '???', 'dining table', '???',
+    '???', 'toilet', '???', 'tv', 'laptop', 'mouse', 'remote', 'keyboard',
+    'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator',
+    '???', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
+    'toothbrush'
+]
 
-detection_thread = None
-running = False
-last_detections = []
+print("[INFO] Loading model...")
+detector = hub.load("https://tfhub.dev/tensorflow/ssd_mobilenet_v2/fpnlite_320x320/1")
 
-def speak(text):
-    engine.say(text)
-    engine.runAndWait()
+def estimate_close(box, frame_width, frame_height):
+    ymin, xmin, ymax, xmax = box
+    box_height = (ymax - ymin) * frame_height
+    return box_height > 150  # adjust threshold as needed
 
-def detection_loop():
-    global running, last_detections
+@app.route('/detect', methods=['POST'])
+def detect_objects():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Cannot open camera")
-        running = False
-        return
+    file = request.files['image']
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        return jsonify({'error': 'Invalid image file'}), 400
 
-    while running:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame")
-            break
+    h, w, _ = img.shape
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    resized = tf.image.resize(img_rgb, (320, 320))
+    resized = tf.cast(resized, tf.uint8)
+    input_tensor = tf.expand_dims(resized, 0)
 
-        results = model(frame[:, :, ::-1])
-        detections = results.pandas().xyxy[0]
+    result = detector(input_tensor)
+    result = {key: value.numpy() for key, value in result.items()}
 
-        last_detections = []
+    boxes = result['detection_boxes'][0]
+    class_ids = result['detection_classes'][0].astype(np.int32)
+    scores = result['detection_scores'][0]
 
-        spoken = False
-        for idx, obj in detections.iterrows():
-            width = obj['xmax'] - obj['xmin']
-            height = obj['ymax'] - obj['ymin']
-            area = width * height
+    detected_objects = []
 
-            last_detections.append({
-                "name": obj['name'],
-                "confidence": obj['confidence'],
-                "bbox": [obj['xmin'], obj['ymin'], obj['xmax'], obj['ymax']]
-            })
+    for i in range(len(scores)):
+        if scores[i] < 0.5:
+            continue
+        label = COCO_LABELS[class_ids[i]]
+        close = estimate_close(boxes[i], w, h)
+        detected_objects.append({
+            'label': label,
+            'score': float(scores[i]),
+            'close': bool(close)
+        })
 
-            if area > 40000 and not spoken:
-                speak(f"{obj['name']} is close by!")
-                spoken = True
-
-        time.sleep(0.1)  # small delay to reduce CPU load
-
-    cap.release()
-
-@app.route('/start')
-def start_detection():
-    global running, detection_thread
-    if running:
-        return jsonify({"status": "already running"})
-
-    running = True
-    detection_thread = threading.Thread(target=detection_loop)
-    detection_thread.start()
-    return jsonify({"status": "detection started"})
-
-@app.route('/stop')
-def stop_detection():
-    global running, detection_thread
-    if not running:
-        return jsonify({"status": "not running"})
-
-    running = False
-    detection_thread.join()
-    return jsonify({"status": "detection stopped"})
-
-@app.route('/status')
-def status():
-    global last_detections
-    return jsonify({"last_detections": last_detections})
+    return jsonify({'detections': detected_objects})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=8000)
