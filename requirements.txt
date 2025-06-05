@@ -1,6 +1,5 @@
 flask
-torch
+tensorflow
+tensorflow_hub
+numpy
 opencv-python-headless
-pillow
-pandas
-pyttsx3
