@@ -3,7 +3,7 @@ import time
 import torch
 import cv2
 import pyttsx3
-from flask import Flask, jsonify
+from flask import Flask, jsonifym request
 
 app = Flask(__name__)
 
