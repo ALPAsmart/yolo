@@ -1,2 +1,6 @@
-Flask
-Gunicorn
+flask
+torch
+opencv-python-headless
+pillow
+pandas
+pyttsx3
